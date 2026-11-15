@@ -1,0 +1,4 @@
+# A MineColonies .blueprint, converted by the port-blueprint crate's `bp2nbt`, loaded by the
+# StructureTemplateManager and placed with rotation: it runs another process (the converter) and
+# reads prepared resources, and it stops with a message where the converter is not installed.
+horizon-client game::blueprint_nbt_tests::a_converted_blueprint_places_and_rotates_cell_by_cell lib daily child-process
