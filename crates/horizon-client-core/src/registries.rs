@@ -17,10 +17,23 @@ pub struct SelectorToken {
     /// A `sort=` value: `nearest`, `furthest`, `random` or `arbitrary`.
     pub sort: &'static str,
 }
+/// Who a completion is for, while a mod's argument provider answers it: the player typing, whose
+/// command permission level is [`Registries::permission`]. The mod's provider decides what to
+/// offer; the engine filters its candidates by the typed text only.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandSender {
+    /// The player's UUID.
+    pub uuid: u128,
+    /// Their account name.
+    pub name: String,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Registries {
     /// Permission level of the command source.
     pub permission: u8,
+    /// The player a completion is for, while a mod's argument provider answers it; `None` for
+    /// a console source and for a client completing its own commands before its profile is known.
+    pub sender: Option<CommandSender>,
     pub items: Vec<String>,
     pub item_tags: Vec<String>,
     /// Block id -> (property, allowed values).

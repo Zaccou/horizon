@@ -1628,3 +1628,154 @@ fn a_servers_own_profiler_keeps_its_node_and_is_not_horizons() {
     assert_eq!(offered, ["open"]);
     assert!(!vanilla::game_dispatcher().has_horizon_profiler());
 }
+
+/// The provider a test argument type declares: it records every request and answers a fixed
+/// candidate list, so a test can see what the engine asked and which candidates it kept.
+type ProviderCalls =
+    std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, String)>, Option<(u128, String)>)>>>;
+
+fn provider_argument(candidates: Vec<CustomSuggestion>, calls: ProviderCalls) -> ArgType {
+    let argument = CustomArgument::new(
+        "example:machine",
+        CustomArgumentKind::Word,
+        |input| Ok(input.to_owned()),
+        |_| panic!("the type's own suggest is not called once it declares a provider"),
+    )
+    .with_provider(move |reg, prefix, arguments| {
+        calls.lock().unwrap().push((
+            prefix.to_owned(),
+            arguments
+                .iter()
+                .map(|argument| (argument.name.clone(), argument.text.clone()))
+                .collect(),
+            reg.sender
+                .as_ref()
+                .map(|sender| (sender.uuid, sender.name.clone())),
+        ));
+        candidates.clone()
+    });
+    ArgType::Custom(argument)
+}
+
+/// `machine use <mode:example:mode> <machine:example:machine>`: a plain custom argument before
+/// the one the provider completes.
+fn provider_dispatcher(argument: ArgType) -> Dispatcher {
+    let plain = ArgType::Custom(CustomArgument::new(
+        "example:mode",
+        CustomArgumentKind::Word,
+        |input| Ok(input.to_owned()),
+        |_| Vec::new(),
+    ));
+    let mut dispatcher = Dispatcher::new();
+    let command = dispatcher.literal(0, "machine");
+    let use_node = dispatcher.literal(command, "use");
+    let mode = dispatcher.argument(use_node, "mode", plain);
+    let machine = dispatcher.argument(mode, "machine", argument);
+    dispatcher.executes(machine, "test");
+    dispatcher
+}
+
+#[test]
+fn a_declared_provider_is_asked_with_the_prefix_the_earlier_arguments_and_the_sender() {
+    let calls: ProviderCalls = Default::default();
+    let dispatcher = provider_dispatcher(provider_argument(
+        [
+            CustomSuggestion {
+                text: "press".into(),
+                tooltip: Some("a press".into()),
+            },
+            CustomSuggestion {
+                text: "furnace".into(),
+                tooltip: None,
+            },
+            CustomSuggestion {
+                text: "extra/press".into(),
+                tooltip: None,
+            },
+        ]
+        .to_vec(),
+        calls.clone(),
+    ));
+    let mut registries = reg();
+    registries.sender = Some(horizon_client_core::registries::CommandSender {
+        uuid: 42,
+        name: "Simon".into(),
+    });
+    let typed = "machine use fast pr";
+    let (_, suggestions) = dispatcher.suggestions(
+        &dispatcher.parse(typed, &registries),
+        typed.len(),
+        &registries,
+    );
+    // SharedSuggestionProvider.suggest: the prefix at the start, or after a `.`, `_` or `/`; the
+    // merged list is sorted by text ignoring case.
+    assert_eq!(
+        suggestions
+            .iter()
+            .map(|s| (s.text.as_str(), s.tooltip.as_deref()))
+            .collect::<Vec<_>>(),
+        [("extra/press", None), ("press", Some("a press"))]
+    );
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [(
+            "pr".to_owned(),
+            vec![("mode".to_owned(), "fast".to_owned())],
+            Some((42, "Simon".to_owned()))
+        )]
+    );
+}
+
+#[test]
+fn a_provider_answer_is_capped_and_text_past_the_bounds_is_dropped_by_name() {
+    let calls: ProviderCalls = Default::default();
+    let mut candidates = vec![
+        CustomSuggestion {
+            text: "m0".into(),
+            tooltip: None,
+        },
+        CustomSuggestion {
+            // STRING_UTF8's limit is 32767 UTF-16 code units.
+            text: "a".repeat(MAX_SUGGESTION_TEXT + 1),
+            tooltip: None,
+        },
+        CustomSuggestion {
+            text: "m1".into(),
+            // The NBT string limit for a tooltip is 65535 modified-UTF-8 bytes.
+            tooltip: Some("b".repeat(MAX_SUGGESTION_TOOLTIP + 1)),
+        },
+    ];
+    candidates.extend((2..MAX_PROVIDER_SUGGESTIONS + 4).map(|i| CustomSuggestion {
+        text: format!("m{i}"),
+        tooltip: None,
+    }));
+    let dispatcher = provider_dispatcher(provider_argument(candidates, calls.clone()));
+    let registries = reg();
+    let typed = "machine use fast ";
+    let (_, suggestions) = dispatcher.suggestions(
+        &dispatcher.parse(typed, &registries),
+        typed.len(),
+        &registries,
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1, "one request, one answer");
+    // 1005 candidates: the reply keeps the first 1000, then the two past the text bounds go.
+    let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts.len(), MAX_PROVIDER_SUGGESTIONS - 2);
+    assert!(texts.contains(&"m0"));
+    assert!(
+        !texts.contains(&"m1"),
+        "the candidate whose tooltip is past the NBT string limit is dropped, by name"
+    );
+    assert!(
+        !texts.contains(&"m999"),
+        "the count stops the reply at 1000 candidates, so m999 is never offered"
+    );
+    assert!(
+        texts.contains(&"m998"),
+        "the candidates before the cap stay"
+    );
+    assert!(
+        texts.iter().all(|text| text.len() <= MAX_SUGGESTION_TEXT),
+        "the 32768-code-unit candidate is dropped, by name"
+    );
+}

@@ -7,6 +7,7 @@
 //! unmodded client cannot read and whose node it drops; the string keeps a vanilla tree valid.
 
 use crate::Text;
+use std::sync::Arc;
 
 /// How much of the command line a custom argument's value takes.
 ///
@@ -122,7 +123,25 @@ pub trait CommandArgumentType: Send + Sync + 'static {
     /// Java modified UTF-8 (the NBT string limit). If any result exceeds either limit, the
     /// engine reports the refusal and discards the callback's results, rather than truncating
     /// player-visible text. A panicking native callback is also refused.
+    ///
+    /// A type that declares a [`suggestion_provider`](Self::suggestion_provider) is not asked
+    /// this way for its arguments: the engine asks that provider instead.
     fn suggest(&self, prefix: &str) -> Vec<CommandSuggestion>;
+
+    /// The suggestion provider this type declares for its arguments, or `None`.
+    ///
+    /// Read once, when the command tree is built: a usage that names this type as an argument's
+    /// kind gets the node's ask-the-server marker, and a player's client asks the server for that
+    /// argument, so no mod code runs on a client. The server then asks
+    /// [`SuggestionProvider::suggest`] with the text typed for the argument, the arguments parsed
+    /// before it and the sender, and keeps the candidates that match the typed text by the game's
+    /// own rules. [`suggest`](Self::suggest) is not called for those arguments.
+    ///
+    /// The default declares no provider, which leaves the argument completed by
+    /// [`suggest`](Self::suggest) alone.
+    fn suggestion_provider(&self) -> Option<Arc<dyn crate::SuggestionProvider>> {
+        None
+    }
 }
 
 /// A ready argument type that takes one of a fixed set of words: NeoForge's `EnumArgument`.

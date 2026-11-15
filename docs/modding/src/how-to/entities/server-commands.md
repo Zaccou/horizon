@@ -169,6 +169,64 @@ instead of writing a type: `r.register_command_argument("mode",
 ChoiceArgument::new(["low", "high"]))`. It refuses other words, listing the valid
 ones, and completes the choices that start with the typed text.
 
+### Suggestions from a provider declared on the argument
+
+`suggest` sees the typed prefix and nothing else. A type whose completions depend on
+who is typing, or on the arguments before it, declares a `SuggestionProvider`
+instead: `CommandArgumentType::suggestion_provider` returns it, and the engine asks
+it for that argument and no other. `suggest` is not called for those arguments, and a
+mod that declares a provider needs no `tab_complete` for it.
+
+```rust,ignore
+use mod_api::{
+    CommandSuggestion, SuggestionProvider, SuggestionReply, SuggestionRequest, TypedArgument,
+};
+
+struct Warps;
+
+impl SuggestionProvider for Warps {
+    fn suggest(&self, request: &SuggestionRequest) -> SuggestionReply {
+        // `request.sender` is `None` for the console.
+        let level = request.sender.as_ref().map_or(0, |sender| sender.permission().level());
+        let world = request
+            .arguments
+            .iter()
+            .find(|argument| argument.name == "world")
+            .map_or("", |argument: &TypedArgument| argument.text.as_str());
+        let mut suggestions = Vec::new();
+        for warp in warps_of(level, world) {
+            if warp.starts_with(&request.prefix) {
+                suggestions.push(CommandSuggestion::with_tooltip(warp, "a warp"));
+            }
+        }
+        SuggestionReply::new(suggestions)
+    }
+}
+
+impl CommandArgumentType for WarpName {
+    // ...
+    fn suggestion_provider(&self) -> Option<Arc<dyn SuggestionProvider>> {
+        Some(Arc::new(Warps))
+    }
+}
+```
+
+The provider runs on the server, in the player's own command source: it sees the
+text typed for its argument, the arguments parsed before it (each a name and the text
+the engine parsed for it), and the sender's UUID, name and command level. Every
+request is answered from scratch; nothing is kept between two requests. An error or a
+panic answers no suggestions and is logged against the argument type. The provider's
+name may also filter: the engine keeps the candidates that match the typed text by
+the game's own rule (at the start, or after each `.`, `_` or `/`), so a provider that
+returns everything still completes the same way.
+
+The engine caps a reply at 1,000 candidates and each text at the protocol's 32,767
+UTF-16 code units (a tooltip at 65,535 bytes of Java modified UTF-8). A candidate past
+a bound is dropped and named in the diagnostics; the others are kept, and the player's
+chat is never disconnected over it. A client never runs the provider: the argument's
+node carries `minecraft:ask_server`, so the client asks the server, exactly as for a
+`suggest`-only type.
+
 `CommandArgumentKind::Word` takes one word of ASCII letters, digits and `_ - . +`; the
 word ends at the first other character, a space included, so a value with `:` or `/`
 needs `Greedy`, which takes the rest of the line and must be the usage's last argument.

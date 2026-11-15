@@ -294,6 +294,12 @@ impl Game<'_> {
         };
         let reg = &mut self.ui.registries;
         let level = std::mem::replace(&mut reg.permission, permission);
+        let own_sender = reg
+            .sender
+            .replace(horizon_client_core::registries::CommandSender {
+                uuid: player_uuid,
+                name: player_name.clone(),
+            });
         let own_players = std::mem::replace(&mut reg.players, players);
         let own_ops = std::mem::replace(&mut reg.ops, ops);
         let own_banned = std::mem::replace(&mut reg.banned_players, banned_players);
@@ -312,6 +318,7 @@ impl Game<'_> {
         );
         let reg = &mut self.ui.registries;
         reg.permission = level;
+        reg.sender = own_sender;
         reg.players = own_players;
         reg.ops = own_ops;
         reg.banned_players = own_banned;
