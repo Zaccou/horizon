@@ -33,11 +33,11 @@ impl EffectsClientHost for Fake {
     }
 }
 
-/// What the widgets asked the game to draw: each button as (label, active, highlighted), each
-/// field's view; every character 6 pixels wide, from 4 pixels in.
+/// What the widgets asked the game to draw: each button as (label, active, highlighted, its own
+/// sprites), each field's view; every character 6 pixels wide, from 4 pixels in.
 #[derive(Default)]
 struct Recorder {
-    buttons: Vec<(Text, bool, bool)>,
+    buttons: Vec<(Text, bool, bool, Option<ButtonSprites>)>,
     fields: Vec<TextFieldView>,
 }
 impl DrawContext for Recorder {
@@ -47,9 +47,11 @@ impl DrawContext for Recorder {
         label: &Text,
         active: bool,
         highlighted: bool,
+        sprites: Option<&ButtonSprites>,
     ) -> Result<(), crate::text::TextFormError> {
         label.validate_depth()?;
-        self.buttons.push((label.clone(), active, highlighted));
+        self.buttons
+            .push((label.clone(), active, highlighted, sprites.cloned()));
         Ok(())
     }
     fn widget_text_field(&mut self, field: &TextFieldView) -> TextFieldLayout {
@@ -240,8 +242,8 @@ fn drawing_asks_the_game_for_each_widget() {
     assert_eq!(
         draw.buttons,
         [
-            (Text::literal("Copy"), true, true),
-            (Text::literal("Done"), false, false)
+            (Text::literal("Copy"), true, true, None),
+            (Text::literal("Done"), false, false, None)
         ]
     );
     assert_eq!(
@@ -352,4 +354,83 @@ fn an_ignored_press_starts_no_double_click() {
     widgets.mouse_pressed(&host, [27.0, 15.0], 0, 0);
     let edit = &widgets.text_field(a).unwrap().edit;
     assert_eq!((edit.highlight, edit.cursor), (2, 2));
+}
+
+/// A button's own art goes to the game as it is, and a button built with none still asks for the
+/// game's `widget/button` (no existing mod changes): the label, the state and the highlight the
+/// group sends are the ones it sent before.
+#[test]
+fn a_button_without_sprites_draws_the_vanilla_one() {
+    let host = Fake::default();
+    let mut widgets = Widgets::new();
+    let plain = widgets.add_button(Button::new(
+        [10.0, 10.0, 100.0, 20.0],
+        Text::literal("Done"),
+    ));
+    let art = ButtonSprites::new("mymod:gui/sprites/builder_button_mini")
+        .with_highlighted("mymod:gui/sprites/builder_button_mini_highlighted")
+        .with_disabled("mymod:gui/sprites/builder_button_mini_disabled")
+        .with_label_offset([0.0, 2.0]);
+    let own = widgets.add_button(
+        Button::new([10.0, 40.0, 14.0, 15.0], Text::literal("Cut")).with_sprites(art.clone()),
+    );
+    assert_eq!(widgets.button(plain).unwrap().sprites, None);
+    assert_eq!(widgets.button(own).unwrap().sprites.as_ref(), Some(&art));
+    let mut draw = Recorder::default();
+    widgets.draw(&mut draw, &host, [0.0, 0.0]).unwrap();
+    assert_eq!(
+        draw.buttons,
+        [
+            (Text::literal("Done"), true, false, None),
+            (Text::literal("Cut"), true, false, Some(art)),
+        ]
+    );
+}
+
+/// A button of its own art is taken by a left click, keeps the focus, is pressed by Enter and
+/// Space, and Tab reaches it: the presses are the group's, not the sprite path's.
+#[test]
+fn a_sprite_button_still_answers_a_press_and_takes_the_focus() {
+    let host = Fake::default();
+    let mut widgets = Widgets::new();
+    let id = widgets.add_button(
+        Button::new([10.0, 10.0, 14.0, 15.0], Text::literal("Cut")).with_sprites(
+            ButtonSprites::new("mymod:gui/sprites/builder_button_mini")
+                .with_highlighted("mymod:gui/sprites/builder_button_mini_highlighted")
+                .with_disabled("mymod:gui/sprites/builder_button_mini_disabled"),
+        ),
+    );
+    assert_eq!(
+        widgets.mouse_pressed(&host, [12.0, 12.0], 0, 0),
+        Outcome::Pressed(id)
+    );
+    assert_eq!(widgets.focused(), Some(id));
+    widgets.mouse_released(0);
+    assert_eq!(
+        widgets.key_pressed(&host, "key.keyboard.enter", 0),
+        Outcome::Pressed(id)
+    );
+    assert_eq!(
+        widgets.key_pressed(&host, "key.keyboard.space", 0),
+        Outcome::Pressed(id)
+    );
+    // A press over nothing clears the focus; Tab reaches the button again and Enter presses it.
+    assert_eq!(
+        widgets.mouse_pressed(&host, [300.0, 300.0], 0, 0),
+        Outcome::Ignored
+    );
+    assert_eq!(widgets.focused(), None);
+    assert_eq!(
+        widgets.key_pressed(&host, "key.keyboard.tab", 0),
+        Outcome::Handled
+    );
+    assert_eq!(widgets.focused(), Some(id));
+    assert_eq!(
+        widgets.key_pressed(&host, "key.keyboard.enter", 0),
+        Outcome::Pressed(id)
+    );
+    assert_eq!(
+        *host.sounds.borrow(),
+        ["minecraft:ui.button.click"; 4].map(String::from)
+    );
 }

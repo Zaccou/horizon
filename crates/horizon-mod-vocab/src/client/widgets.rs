@@ -9,7 +9,9 @@
 //! They behave as vanilla's `Button` and `EditBox` do: the game draws them with its own sprites,
 //! label and caret (`DrawContext::widget_button`, `DrawContext::widget_text_field`), so they get
 //! its narration and controller support, and a text field edits with the same core as the
-//! game's own ([`TextEdit`](crate::TextEdit)). Everything else is plain Rust in the mod,
+//! game's own ([`TextEdit`](crate::TextEdit)). A button given
+//! [`ButtonSprites`](crate::client::widgets::ButtonSprites) draws the mod's own art instead, and
+//! keeps that narration and focus. Everything else is plain Rust in the mod,
 //! the same in a native and a wasm build.
 //!
 //! ```
@@ -75,7 +77,55 @@ impl Outcome {
     }
 }
 
-/// A push button (`Button`): a label on the game's `widget/button` sprite.
+/// A button's own art, instead of the game's `widget/button`: a sprite per state, and where its
+/// label sits on it. What a mod with its own button textures draws (BlockUI's `ButtonImage`).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ButtonSprites {
+    /// Drawn stretched into the button's rectangle while it is neither highlighted nor inactive.
+    pub normal: String,
+    /// Drawn when the pointer is over it or it has the focus; [`normal`](Self::normal) when
+    /// `None`.
+    pub highlighted: Option<String>,
+    /// Drawn when it is inactive; [`normal`](Self::normal) when `None`.
+    pub disabled: Option<String>,
+    /// Added to the centred label position, `[x, y]` in GUI pixels: a button whose art leaves
+    /// room for its text somewhere else.
+    pub label_offset: [f32; 2],
+}
+
+impl ButtonSprites {
+    /// One sprite for every state, with the label where the game centres it.
+    pub fn new(normal: impl Into<String>) -> Self {
+        Self {
+            normal: normal.into(),
+            highlighted: None,
+            disabled: None,
+            label_offset: [0.0, 0.0],
+        }
+    }
+
+    /// Its highlighted sprite, drawn when the pointer is over it or it has the focus.
+    pub fn with_highlighted(mut self, sprite: impl Into<String>) -> Self {
+        self.highlighted = Some(sprite.into());
+        self
+    }
+
+    /// Its inactive sprite.
+    pub fn with_disabled(mut self, sprite: impl Into<String>) -> Self {
+        self.disabled = Some(sprite.into());
+        self
+    }
+
+    /// The label shifted by `offset` from where the button centres it.
+    pub fn with_label_offset(mut self, offset: [f32; 2]) -> Self {
+        self.label_offset = offset;
+        self
+    }
+}
+
+/// A push button (`Button`): a label on the game's `widget/button` sprite, or on its own.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
@@ -86,16 +136,25 @@ pub struct Button {
     pub label: Text,
     /// An inactive button is greyed out, takes no press and is skipped by Tab.
     pub active: bool,
+    /// Its own art, state by state; `None` draws the game's `widget/button` as before.
+    pub sprites: Option<ButtonSprites>,
 }
 
 impl Button {
-    /// An active button.
+    /// An active button with the game's sprite.
     pub fn new(rect: [f32; 4], label: Text) -> Self {
         Self {
             rect,
             label,
             active: true,
+            sprites: None,
         }
+    }
+
+    /// The same button drawing its own art.
+    pub fn with_sprites(mut self, sprites: ButtonSprites) -> Self {
+        self.sprites = Some(sprites);
+        self
     }
 }
 
@@ -403,7 +462,13 @@ impl Widgets {
             match widget {
                 Widget::Button(button) => {
                     let highlighted = button.active && (focused || over(button.rect, mouse));
-                    draw.widget_button(button.rect, &button.label, button.active, highlighted)?;
+                    draw.widget_button(
+                        button.rect,
+                        &button.label,
+                        button.active,
+                        highlighted,
+                        button.sprites.as_ref(),
+                    )?;
                 }
                 Widget::TextField(field) => {
                     let layout = draw.widget_text_field(&field.view(focused, now));

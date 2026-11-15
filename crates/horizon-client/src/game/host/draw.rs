@@ -126,10 +126,17 @@ impl DrawContext for GameDrawContext<'_, '_> {
         label: &Text,
         active: bool,
         highlighted: bool,
+        sprites: Option<&ButtonSprites>,
     ) -> Result<(), mod_api::text::TextFormError> {
         let label = label.try_into_engine(&())?;
-        self.game
-            .native_widget_button(&mut *self.surface, rect, &label, active, highlighted);
+        self.game.native_widget_button(
+            &mut *self.surface,
+            rect,
+            &label,
+            active,
+            highlighted,
+            sprites,
+        );
         Ok(())
     }
     fn widget_text_field(&mut self, field: &TextFieldView) -> TextFieldLayout {

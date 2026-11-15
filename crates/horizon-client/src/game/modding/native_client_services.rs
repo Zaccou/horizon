@@ -35,7 +35,8 @@ impl Game<'_> {
             rgba(r, g, b, a),
         );
     }
-    /// A mod's button, drawn as the game's screens draw theirs (`ui::button`).
+    /// A mod's button, drawn as the game's screens draw theirs (`ui::button`), or with the mod's
+    /// own sprites (`ui::button_with_sprites`) when it has them.
     pub(super) fn native_widget_button(
         &self,
         batch: &mut HudBatch,
@@ -43,17 +44,36 @@ impl Game<'_> {
         label: &Text,
         active: bool,
         highlighted: bool,
+        sprites: Option<&mod_api::ButtonSprites>,
     ) {
-        horizon_client::ui::button(
+        let Some(sprites) = sprites else {
+            horizon_client::ui::button(
+                batch,
+                &self.gui.atlas,
+                x,
+                y,
+                w,
+                h,
+                label,
+                active,
+                highlighted,
+            );
+            return;
+        };
+        horizon_client::ui::button_with_sprites(
             batch,
             &self.gui.atlas,
-            x,
-            y,
-            w,
-            h,
+            [x, y, w, h],
             label,
             active,
             highlighted,
+            false,
+            &horizon_client::ui::ButtonSprites {
+                normal: &sprites.normal,
+                highlighted: sprites.highlighted.as_deref(),
+                disabled: sprites.disabled.as_deref(),
+                label_offset: sprites.label_offset,
+            },
         );
     }
     /// A mod's text field, drawn as the game's screens draw theirs (`ui::EditBox`), from the
@@ -136,9 +156,10 @@ mod tests {
         });
     }
 
-    /// A mod's widgets draw with the game's own: a button as `ui::button` draws it, and a text
-    /// field as `ui::EditBox` draws it, answering where each shown character ends so a press
-    /// lands on it, and scrolling on to keep the cursor in view.
+    /// A mod's widgets draw with the game's own: a button as `ui::button` draws it (and with its
+    /// own sprites as `ui::button_with_sprites` does), and a text field as `ui::EditBox` draws
+    /// it, answering where each shown character ends so a press lands on it, and scrolling on to
+    /// keep the cursor in view.
     #[test]
     #[ignore = "daily"]
     fn mod_widgets_draw_as_the_games_own() {
@@ -146,7 +167,14 @@ mod tests {
         super::super::native_entity_refs::tests::with_client_game(|game| {
             let label = Text::literal("Done");
             let mut ours = HudBatch::scratch([320, 240]);
-            game.native_widget_button(&mut ours, [10.0, 10.0, 100.0, 20.0], &label, true, true);
+            game.native_widget_button(
+                &mut ours,
+                [10.0, 10.0, 100.0, 20.0],
+                &label,
+                true,
+                true,
+                None,
+            );
             let mut games = HudBatch::scratch([320, 240]);
             horizon_client::ui::button(
                 &mut games,
@@ -163,6 +191,24 @@ mod tests {
             assert_eq!(
                 bytemuck::cast_slice::<_, u8>(&ours.vertices),
                 bytemuck::cast_slice::<_, u8>(&games.vertices)
+            );
+            // The same button of the mod's own art: the game's sprite stays in the atlas, and
+            // the mod's takes its place while keeping the label, the narration and the focus.
+            let art = mod_api::ButtonSprites::new("gui/sprites/widget/button_disabled");
+            let mut sprite = HudBatch::scratch([320, 240]);
+            game.native_widget_button(
+                &mut sprite,
+                [10.0, 10.0, 100.0, 20.0],
+                &label,
+                true,
+                true,
+                Some(&art),
+            );
+            assert!(!sprite.vertices.is_empty());
+            assert_ne!(
+                bytemuck::cast_slice::<_, u8>(&sprite.vertices),
+                bytemuck::cast_slice::<_, u8>(&ours.vertices),
+                "the mod's own sprite is drawn instead of `widget/button`"
             );
 
             // The view a mod's group sends for a focused field, as `Widgets::draw` builds it.
@@ -193,6 +239,315 @@ mod tests {
             );
             assert!(layout.edges.windows(2).all(|w| w[0] < w[1]));
             assert!(*layout.edges.last().unwrap() <= 10.0 + 60.0 - 4.0);
+        });
+    }
+
+    /// #4491's acceptance probe: a screen of 50 buttons 14x15 px — the size
+    /// `windowhutallinventory.xml:8` gives MineColonies' own art — each a three-character label
+    /// and a sprite of its own, cut from the mod's own image so every button's art is a colour of
+    /// its own. Every button shows its sprite, the highlighted one under the pointer, the disabled
+    /// one when inactive; a click presses one and Tab and Enter reach the next; the screen draws
+    /// in 16 ms a frame; and a pixel diff against the same screen drawn with the game's sprite
+    /// changes the 50 rectangles and nothing else.
+    #[test]
+    #[ignore = "daily"]
+    fn fifty_sprite_buttons_draw_their_own_art_and_still_answer_a_click() {
+        use mod_api::client::widgets::{Button, ButtonSprites, Outcome, Widgets};
+        use mod_platform::testing::with_mods;
+        use std::time::{Duration, Instant};
+
+        /// The mod's image is 1024 texels square: 20 blocks of 50 a row hold its 150 sprites.
+        const BLOCK: u32 = 50;
+        const ROW: u32 = 20;
+        /// The HUD the probe draws.
+        const SIZE: [u32; 2] = [320, 240];
+        const IMAGE: u32 = horizon_client::hud::MOD_IMAGE_SIZE;
+        let rect = |i: usize| {
+            let (col, row) = (i % 10, i / 10);
+            [8.0 + col as f32 * 18.0, 8.0 + row as f32 * 18.0, 14.0, 15.0]
+        };
+        let sprite = |i: usize, state: usize| format!("probe:gui/sprites/button_{i}_{state}");
+        let colour = |i: usize, state: usize| {
+            let n = (i * 3 + state) as u8;
+            [
+                n.wrapping_mul(37),
+                n.wrapping_mul(53),
+                n.wrapping_mul(29),
+                255,
+            ]
+        };
+        let block = |i: usize, state: usize| {
+            let at = (i * 3 + state) as u32;
+            ((at % ROW) * BLOCK, (at / ROW) * BLOCK)
+        };
+        // A batch's sprite quads, as `([x, y, x+w, y+h], [u0, v0, u1, v1])`: every quad of six
+        // vertices that is not text, whatever the label's glyphs between them.
+        let sprite_quads = |batch: &HudBatch| -> Vec<([f32; 4], [f32; 4])> {
+            let sprite: Vec<_> = batch
+                .vertices
+                .iter()
+                .filter(|v| v.text == 0)
+                .copied()
+                .collect();
+            sprite
+                .chunks(6)
+                .map(|q| {
+                    let (a, c) = (q[0], q[2]);
+                    (
+                        [a.pos[0], a.pos[1], c.pos[0], c.pos[1]],
+                        [a.uv[0], a.uv[1], c.uv[0], c.uv[1]],
+                    )
+                })
+                .collect()
+        };
+        let mut image = vec![0u8; (IMAGE * IMAGE * 4) as usize];
+        for i in 0..50 {
+            for state in 0..3 {
+                let (bx, by) = block(i, state);
+                for y in by..by + BLOCK {
+                    for x in bx..bx + BLOCK {
+                        let px = ((y * IMAGE + x) * 4) as usize;
+                        image[px..px + 4].copy_from_slice(&colour(i, state));
+                    }
+                }
+            }
+        }
+
+        /// A mod with no hook: it only uses the API, for the image slot on the atlas.
+        struct ApiOnly;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for ApiOnly {}
+        let mods = vec![mod_api::ModEntry::new("api-only", Box::new(ApiOnly))];
+
+        /// A mod's group drawing through the game, as the screen forwarder does.
+        struct Draws<'a, 'g>(&'a Game<'g>, HudBatch);
+        impl mod_api::DrawContext for Draws<'_, '_> {
+            fn widget_button(
+                &mut self,
+                rect: [f32; 4],
+                label: &mod_api::Text,
+                active: bool,
+                highlighted: bool,
+                sprites: Option<&ButtonSprites>,
+            ) -> Result<(), mod_api::text::TextFormError> {
+                let label = crate::game::api_values::TryIntoEngine::try_into_engine(label, &())?;
+                self.0.native_widget_button(
+                    &mut self.1,
+                    rect,
+                    &label,
+                    active,
+                    highlighted,
+                    sprites,
+                );
+                Ok(())
+            }
+        }
+
+        with_mods(mods.into(), || {
+            super::super::native_entity_refs::tests::with_client_game(|game| {
+                assert!(game.mod_image(IMAGE, IMAGE, &image));
+                // One atlas slot for the whole image: each button's art is a block of it.
+                let slot = game.gui.atlas.sprites[horizon_client::hud::MOD_IMAGE_SPRITE];
+                let (du, dv) = (
+                    (slot.u1 - slot.u0) / IMAGE as f32,
+                    (slot.v1 - slot.v0) / IMAGE as f32,
+                );
+                for i in 0..50 {
+                    for state in 0..3 {
+                        let (bx, by) = block(i, state);
+                        let (x, y) = (bx as f32 * du, by as f32 * dv);
+                        game.gui.atlas.sprites.insert(
+                            sprite(i, state),
+                            horizon_client::hud::Rect {
+                                u0: slot.u0 + x,
+                                v0: slot.v0 + y,
+                                u1: slot.u0 + x + BLOCK as f32 * du,
+                                v1: slot.v0 + y + BLOCK as f32 * dv,
+                                w: BLOCK,
+                                h: BLOCK,
+                            },
+                        );
+                    }
+                }
+
+                let mut widgets = Widgets::new();
+                let ids: Vec<_> = (0..50)
+                    .map(|i| {
+                        widgets.add_button(
+                            Button::new(rect(i), mod_api::Text::literal("Cut")).with_sprites(
+                                ButtonSprites::new(sprite(i, 0))
+                                    .with_highlighted(sprite(i, 1))
+                                    .with_disabled(sprite(i, 2)),
+                            ),
+                        )
+                    })
+                    .collect();
+
+                // Every button draws one quad: the atlas rect of its own sprite. The pointer is
+                // over the second one, at [30, 12], which draws its highlighted sprite.
+                let mut first = HudBatch::scratch(SIZE);
+                {
+                    let mut draws = Draws(game, first);
+                    widgets.draw(&mut draws, &*game, [30.0, 12.0]).unwrap();
+                    first = draws.1;
+                }
+                let quads = sprite_quads(&first);
+                assert_eq!(quads.len(), 50, "one sprite a button, and no other quad");
+                for (i, (dst, uv)) in quads.iter().enumerate() {
+                    let art = &game.gui.atlas.sprites[&sprite(i, usize::from(i == 1))];
+                    let [bx, by, bw, bh] = rect(i);
+                    assert_eq!(
+                        *dst,
+                        [bx, by, bx + bw, by + bh],
+                        "button {i}'s own rectangle"
+                    );
+                    assert_eq!(
+                        *uv,
+                        [art.u0, art.v0, art.u1, art.v1],
+                        "button {i}'s own sprite"
+                    );
+                }
+
+                // Inactive: the disabled sprite, and no press.
+                widgets.button_mut(ids[4]).unwrap().active = false;
+                let mut off = HudBatch::scratch(SIZE);
+                {
+                    let mut draws = Draws(game, off);
+                    widgets.draw(&mut draws, &*game, [0.0, 0.0]).unwrap();
+                    off = draws.1;
+                }
+                let art = &game.gui.atlas.sprites[&sprite(4, 2)];
+                let [bx, by, ..] = rect(4);
+                let quad = sprite_quads(&off)
+                    .into_iter()
+                    .find(|(dst, _)| (dst[0] - bx).abs() < 0.5 && (dst[1] - by).abs() < 0.5)
+                    .expect("the inactive button's sprite");
+                assert_eq!(
+                    quad.1,
+                    [art.u0, art.v0, art.u1, art.v1],
+                    "an inactive button draws its disabled sprite"
+                );
+                let [bx, by, bw, bh] = rect(4);
+                assert_eq!(
+                    widgets.mouse_pressed(&*game, [bx + bw / 2.0, by + bh / 2.0], 0, 0),
+                    Outcome::Ignored,
+                    "a disabled button takes no press"
+                );
+
+                // A click presses one; Tab reaches the first and Enter presses it.
+                assert_eq!(
+                    widgets.mouse_pressed(&*game, [12.0, 12.0], 0, 0),
+                    Outcome::Pressed(ids[0])
+                );
+                widgets.mouse_released(0);
+                widgets.mouse_pressed(&*game, [300.0, 230.0], 0, 0);
+                assert_eq!(
+                    widgets.key_pressed(&*game, "key.keyboard.tab", 0),
+                    Outcome::Handled
+                );
+                assert_eq!(widgets.focused(), Some(ids[0]));
+                assert_eq!(
+                    widgets.key_pressed(&*game, "key.keyboard.enter", 0),
+                    Outcome::Pressed(ids[0])
+                );
+                // The frames below are a plain screen: no button has the keyboard focus.
+                widgets.set_focus(&*game, None);
+
+                // 50 sprite buttons in 16 ms a frame, on any machine that draws vanilla's.
+                let mut frames = Duration::ZERO;
+                for _ in 0..20 {
+                    let start = Instant::now();
+                    let mut draws = Draws(game, HudBatch::scratch(SIZE));
+                    widgets.draw(&mut draws, &*game, [30.0, 12.0]).unwrap();
+                    std::hint::black_box(draws.1.vertices.len());
+                    frames += start.elapsed();
+                }
+                let per_frame = frames / 20;
+                assert!(
+                    per_frame < Duration::from_millis(16),
+                    "{per_frame:?} a frame"
+                );
+
+                // A pixel diff with the same screen drawn with the game's sprite: the 50
+                // rectangles change, whole, and nothing else does.
+                let mut ours = HudBatch::scratch(SIZE);
+                {
+                    let mut draws = Draws(game, ours);
+                    widgets.draw(&mut draws, &*game, [0.0, 0.0]).unwrap();
+                    ours = draws.1;
+                }
+                let mut plain = widgets.clone();
+                for id in &ids {
+                    plain.button_mut(*id).unwrap().sprites = None;
+                }
+                let mut vanilla = HudBatch::scratch(SIZE);
+                {
+                    let mut draws = Draws(game, vanilla);
+                    plain.draw(&mut draws, &*game, [0.0, 0.0]).unwrap();
+                    vanilla = draws.1;
+                }
+                // Both frames upload the same patches — the mod's image and the label's glyphs —
+                // so the only difference between them is the button art itself.
+                let mut patches = std::mem::take(&mut ours.patches);
+                patches.append(&mut game.map_patches);
+                patches.append(&mut vanilla.patches);
+                ours.patches = patches.clone();
+                vanilla.patches = patches;
+                let drawn = horizon_client::gfx::entity_pixel_test::render_hud(
+                    &ours,
+                    &game.gui.atlas,
+                    SIZE,
+                )
+                .expect("software Vulkan draw");
+                let games = horizon_client::gfx::entity_pixel_test::render_hud(
+                    &vanilla,
+                    &game.gui.atlas,
+                    SIZE,
+                )
+                .expect("software Vulkan draw");
+                let inside = |x: u32, y: u32| {
+                    (0..50).any(|i| {
+                        let [bx, by, bw, bh] = rect(i);
+                        (bx..bx + bw).contains(&(x as f32)) && (by..by + bh).contains(&(y as f32))
+                    })
+                };
+                let mut changed = [false; 50];
+                for y in 0..SIZE[1] {
+                    for x in 0..SIZE[0] {
+                        let at = ((y * SIZE[0] + x) * 4) as usize;
+                        let same = drawn[at..at + 4] == games[at..at + 4];
+                        if !inside(x, y) {
+                            assert!(same, "pixel ({x}, {y}) changed outside the 50 buttons");
+                            continue;
+                        }
+                        for (i, flag) in changed.iter_mut().enumerate() {
+                            let [bx, by, bw, bh] = rect(i);
+                            if !same
+                                && (bx..bx + bw).contains(&(x as f32))
+                                && (by..by + bh).contains(&(y as f32))
+                            {
+                                *flag = true;
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    changed.iter().all(|&c| c),
+                    "every button's rectangle changed: {changed:?}"
+                );
+                // Each of them in its own colour, one pixel in from a corner the label never
+                // reaches: the sprite that button names.
+                for i in 0..50 {
+                    let [bx, by, ..] = rect(i);
+                    let at = (((by + 1.0) as u32 * SIZE[0] + (bx + 1.0) as u32) * 4) as usize;
+                    let state = usize::from(i == 4) * 2;
+                    assert_eq!(
+                        &drawn[at..at + 3],
+                        &colour(i, state)[..3],
+                        "button {i}'s own art"
+                    );
+                }
+            });
         });
     }
 }

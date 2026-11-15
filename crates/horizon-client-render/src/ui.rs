@@ -556,6 +556,60 @@ pub fn button(
         crate::widgets::Narratable::button(label.plain(), rect, active)
     });
 }
+
+/// A button's own art, instead of the game's `widget/button`: the sprite of its state, stretched
+/// into its rectangle, and where its label sits on it (a mod's `ButtonSprites`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonSprites<'a> {
+    pub normal: &'a str,
+    pub highlighted: Option<&'a str>,
+    pub disabled: Option<&'a str>,
+    pub label_offset: [f32; 2],
+}
+
+impl ButtonSprites<'_> {
+    /// The sprite this state draws, and the fallback behind it: its own state's, else `normal`.
+    fn art(&self, active: bool, highlighted: bool) -> [&str; 2] {
+        let state = if !active {
+            self.disabled
+        } else if highlighted {
+            self.highlighted
+        } else {
+            None
+        };
+        [state.unwrap_or(self.normal), self.normal]
+    }
+}
+
+/// A [`button`] drawing `sprites` in place of the game's own (`widget_button` for a mod's own
+/// buttons): its state's sprite stretched over its rectangle, or the game's nine-slice when the
+/// atlas has neither that sprite nor `normal`. Its `label_offset` moves the label, which is
+/// otherwise centred, scrolled and greyed exactly as [`button`] draws it.
+#[allow(clippy::too_many_arguments)]
+pub fn button_with_sprites(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    [x, y, w, h]: [f32; 4],
+    label: &Text,
+    active: bool,
+    hover: bool,
+    focused: bool,
+    sprites: &ButtonSprites<'_>,
+) {
+    button_with_room(
+        batch,
+        atlas,
+        [x, y, w, h],
+        label,
+        active,
+        hover,
+        focused,
+        0.0,
+        Some(sprites),
+        |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
+    );
+}
+
 /// A [`button`] with a job on its screen: its controller button and glyph come from `action`, so
 /// a new screen gets them by drawing this for its Done, Back, Cancel or Apply.
 #[allow(clippy::too_many_arguments)]
@@ -586,6 +640,7 @@ pub fn action_button(
         hover,
         false,
         room,
+        None,
         |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
     );
 }
@@ -614,6 +669,7 @@ pub fn button_as(
         hover,
         false,
         0.0,
+        None,
         narration,
     );
 }
@@ -649,6 +705,7 @@ pub(crate) fn focused_button(
         hover,
         focused,
         room,
+        None,
         |rect| crate::widgets::Narratable::button(label.plain(), rect, active),
     );
 }
@@ -663,6 +720,7 @@ fn button_with_room(
     hover: bool,
     focused: bool,
     room: f32,
+    sprites: Option<&ButtonSprites<'_>>,
     narration: impl FnOnce([f32; 4]) -> crate::widgets::Narratable,
 ) {
     let plain = label.plain();
@@ -673,30 +731,47 @@ fn button_with_room(
     }
     crate::widgets::narratable(|| narration([x, y, w, h]).hovered(hover || focused));
     crate::widgets::widget_cursor(hover, active);
-    let sprite = if !active {
-        "gui/sprites/widget/button_disabled"
-    } else if hover || focused {
-        "gui/sprites/widget/button_highlighted"
-    } else {
-        "gui/sprites/widget/button"
-    };
-    nine_slice(batch, atlas, sprite, x, y, w, h, u32::MAX);
+    // A mod's own art when the atlas has it; the game's nine-slice otherwise, for a button with
+    // no sprites and for one whose `normal` this pack doesn't have.
+    let drawn = sprites.is_some_and(|sprites| {
+        sprites
+            .art(active, hover || focused)
+            .into_iter()
+            .any(|art| {
+                if !atlas.sprites.contains_key(art) {
+                    return false;
+                }
+                batch.sprite_scaled(atlas, art, x, y, w, h, u32::MAX);
+                true
+            })
+    });
+    if !drawn {
+        let sprite = if !active {
+            "gui/sprites/widget/button_disabled"
+        } else if hover || focused {
+            "gui/sprites/widget/button_highlighted"
+        } else {
+            "gui/sprites/widget/button"
+        };
+        nine_slice(batch, atlas, sprite, x, y, w, h, u32::MAX);
+    }
     let color = if active {
         rgba(255, 255, 255, 255)
     } else {
         rgba(160, 160, 160, 255)
     };
+    let [offset_x, offset_y] = sprites.map_or([0.0, 0.0], |sprites| sprites.label_offset);
     // Centred on the button, as the title's are, and only moved out from under a glyph.
     scrolling_text_around_at(
         batch,
         atlas,
         label,
-        x + (w / 2.0).floor(),
+        x + (w / 2.0).floor() + offset_x,
         x + 2.0 + room,
         x + w - 2.0,
         y,
         y + h,
-        y + ((h - 8.0) / 2.0).floor(),
+        y + ((h - 8.0) / 2.0).floor() + offset_y,
         crate::hud_overlays::now_ms(),
         color,
     );
@@ -2010,6 +2085,245 @@ mod tests {
             (std::path::Path::new("/nonexistent/horizon-test-assets")).to_owned(),
         ))
         .unwrap()
+    }
+
+    /// [`atlas`] plus GUI sprites of its own: `name` at `[u0, v0, u1, v1]` of the atlas, 14 by 15
+    /// pixels as `windowhutallinventory.xml`'s button art is.
+    fn atlas_with(sprites: &[(&str, [f32; 4])]) -> HudAtlas {
+        let mut atlas = atlas();
+        for (name, [u0, v0, u1, v1]) in sprites {
+            atlas.sprites.insert(
+                (*name).to_owned(),
+                Rect {
+                    u0: *u0,
+                    v0: *v0,
+                    u1: *u1,
+                    v1: *v1,
+                    w: 14,
+                    h: 15,
+                },
+            );
+        }
+        atlas
+    }
+    /// The quads drawn as sprites (not the label's glyphs), as rectangles and UVs.
+    fn sprite_quads(batch: &HudBatch) -> Vec<([f32; 4], [f32; 4])> {
+        let sprite: Vec<_> = batch
+            .vertices
+            .iter()
+            .filter(|v| v.text == 0)
+            .copied()
+            .collect();
+        sprite
+            .chunks(6)
+            .map(|q| {
+                let (a, c) = (q[0], q[2]);
+                (
+                    [a.pos[0], a.pos[1], c.pos[0], c.pos[1]],
+                    [a.uv[0], a.uv[1], c.uv[0], c.uv[1]],
+                )
+            })
+            .collect()
+    }
+
+    /// `mymod`'s button art: normal, highlighted and disabled each their own sprite.
+    fn mod_art() -> ButtonSprites<'static> {
+        ButtonSprites {
+            normal: "mymod:gui/sprites/builder_button_mini",
+            highlighted: Some("mymod:gui/sprites/builder_button_mini_highlighted"),
+            disabled: Some("mymod:gui/sprites/builder_button_mini_disabled"),
+            label_offset: [0.0, 0.0],
+        }
+    }
+    /// The mod's three sprites, and the game's own button sprites behind them.
+    fn art_atlas() -> HudAtlas {
+        atlas_with(&[
+            (
+                "mymod:gui/sprites/builder_button_mini",
+                [0.0, 0.0, 0.2, 0.2],
+            ),
+            (
+                "mymod:gui/sprites/builder_button_mini_highlighted",
+                [0.2, 0.0, 0.4, 0.2],
+            ),
+            (
+                "mymod:gui/sprites/builder_button_mini_disabled",
+                [0.4, 0.0, 0.6, 0.2],
+            ),
+            ("gui/sprites/widget/button", [0.6, 0.0, 0.8, 0.2]),
+            (
+                "gui/sprites/widget/button_highlighted",
+                [0.8, 0.0, 1.0, 0.2],
+            ),
+            ("gui/sprites/widget/button_disabled", [0.0, 0.2, 0.2, 0.4]),
+        ])
+    }
+
+    /// A button with its own art draws the sprite of its state, stretched over its rectangle:
+    /// the normal one, the highlighted one under the pointer or the focus, the disabled one when
+    /// it is inactive.
+    #[test]
+    fn a_sprite_button_draws_its_own_sprite_in_every_state() {
+        let atlas = art_atlas();
+        let label = Text::empty();
+        let rect = [10.0, 20.0, 14.0, 15.0];
+        for (active, hover, focused, uv) in [
+            (true, false, false, [0.0, 0.0, 0.2, 0.2]),
+            (true, true, false, [0.2, 0.0, 0.4, 0.2]),
+            (true, false, true, [0.2, 0.0, 0.4, 0.2]),
+            (false, false, false, [0.4, 0.0, 0.6, 0.2]),
+        ] {
+            let mut batch = HudBatch::scratch([640, 480]);
+            button_with_sprites(
+                &mut batch,
+                &atlas,
+                rect,
+                &label,
+                active,
+                hover,
+                focused,
+                &mod_art(),
+            );
+            assert_eq!(
+                sprite_quads(&batch),
+                [([10.0, 20.0, 24.0, 35.0], uv)],
+                "active {active}, hover {hover}, focused {focused}"
+            );
+        }
+    }
+
+    /// A state whose sprite the button doesn't name draws `normal`, and a `normal` no pack has
+    /// falls back to the game's own sprite rather than drawing nothing.
+    #[test]
+    fn a_missing_highlighted_sprite_falls_back_to_the_normal_one() {
+        let atlas = art_atlas();
+        let label = Text::empty();
+        let rect = [10.0, 20.0, 14.0, 15.0];
+        let normal_only = ButtonSprites {
+            highlighted: None,
+            disabled: None,
+            ..mod_art()
+        };
+        for (active, hover, focused) in [
+            (true, true, false),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let mut batch = HudBatch::scratch([640, 480]);
+            button_with_sprites(
+                &mut batch,
+                &atlas,
+                rect,
+                &label,
+                active,
+                hover,
+                focused,
+                &normal_only,
+            );
+            assert_eq!(
+                sprite_quads(&batch),
+                [([10.0, 20.0, 24.0, 35.0], [0.0, 0.0, 0.2, 0.2])],
+                "active {active}, hover {hover}, focused {focused}"
+            );
+        }
+        // A `normal` this pack doesn't have: the game's own sprite, as much as when there are no
+        // sprites at all.
+        let gone = ButtonSprites {
+            normal: "mymod:gui/sprites/gone",
+            highlighted: None,
+            disabled: None,
+            label_offset: [0.0, 0.0],
+        };
+        let mut ours = HudBatch::scratch([640, 480]);
+        button_with_sprites(&mut ours, &atlas, rect, &label, true, false, false, &gone);
+        assert_eq!(
+            sprite_quads(&ours),
+            [([10.0, 20.0, 24.0, 35.0], [0.6, 0.0, 0.8, 0.2])],
+            "the game's `widget/button`"
+        );
+    }
+
+    /// A button's `label_offset` moves its label, and nothing else: the sprite stays over the
+    /// button's rectangle.
+    #[test]
+    fn a_label_offset_moves_a_buttons_label_only() {
+        let atlas = art_atlas();
+        let label = Text::literal("Cut");
+        let rect = [10.0, 20.0, 40.0, 20.0];
+        let shifted = ButtonSprites {
+            label_offset: [3.0, 4.0],
+            ..mod_art()
+        };
+        let mut plain = HudBatch::scratch([640, 480]);
+        button_with_sprites(
+            &mut plain,
+            &atlas,
+            rect,
+            &label,
+            true,
+            false,
+            false,
+            &mod_art(),
+        );
+        let mut moved = HudBatch::scratch([640, 480]);
+        button_with_sprites(
+            &mut moved, &atlas, rect, &label, true, false, false, &shifted,
+        );
+        assert_eq!(sprite_quads(&plain), sprite_quads(&moved));
+        let glyphs = |batch: &HudBatch| -> Vec<[f32; 2]> {
+            batch
+                .vertices
+                .iter()
+                .filter(|v| v.text == 1)
+                .map(|v| v.pos)
+                .collect()
+        };
+        let (a, b) = (glyphs(&plain), glyphs(&moved));
+        assert!(!a.is_empty() && a.len() == b.len());
+        for (left, right) in a.iter().zip(&b) {
+            assert_eq!([right[0] - left[0], right[1] - left[1]], [3.0, 4.0]);
+        }
+    }
+
+    /// A button of its own art is narrated as the game's is: the same entry for the screen, with
+    /// its label and its state.
+    #[test]
+    fn a_sprite_button_still_records_a_narration_entry() {
+        let atlas = art_atlas();
+        let label = Text::literal("Cut");
+        let rect = [10.0, 20.0, 14.0, 15.0];
+        let narrate = |sprites: Option<&ButtonSprites<'_>>, active: bool| {
+            crate::widgets::set_narrating(true);
+            crate::widgets::end_frame(9_000);
+            crate::widgets::begin_screen(|| {
+                crate::widgets::ScreenInfo::new("hut", "Builder's Hut")
+            });
+            let mut batch = HudBatch::scratch([640, 480]);
+            match sprites {
+                Some(sprites) => button_with_sprites(
+                    &mut batch, &atlas, rect, &label, active, false, false, sprites,
+                ),
+                None => button(
+                    &mut batch, &atlas, 10.0, 20.0, 14.0, 15.0, &label, active, false,
+                ),
+            }
+            crate::widgets::end_frame(9_001);
+            crate::widgets::take_last_narration()
+        };
+        let vanilla = narrate(None, true);
+        let own = narrate(Some(&mod_art()), true);
+        assert_eq!(own.items.len(), 1);
+        assert_eq!(own.items[0].what, vanilla.items[0].what);
+        assert_eq!(
+            own.items[0].what,
+            crate::widgets::What::Button {
+                message: "Cut".into(),
+                active: true,
+            }
+        );
+        // An inactive button of its own art is narrated as inactive, as the game's is.
+        let off = narrate(Some(&mod_art()), false);
+        assert_eq!(off.items[0].what, narrate(None, false).items[0].what);
     }
 
     /// `defaultScrollingHelper` draws an overflowing label from `left` less the

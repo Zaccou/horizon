@@ -178,6 +178,13 @@ pub trait DrawContext {
     /// grey when not `active`), scrolling when it doesn't fit, and recorded for the narrator and
     /// a controller's focus. `rect` is `[x, y, w, h]` in GUI pixels. What
     /// [`crate::client::widgets::Widgets`] draws its buttons with.
+    ///
+    /// `sprites` swaps the game's sprite for the mod's own: the one its state names, drawn
+    /// stretched into `rect` (a nine-slice is [`gui_nine_slice`](Self::gui_nine_slice) by the mod
+    /// itself), the missing `highlighted` or `disabled` one being `normal`, and an unknown
+    /// `normal` falling back to the game's sprite. Its `label_offset` moves the centred label.
+    /// Nothing else changes: the label and its scrolling, the grey inactive colour, the
+    /// narration record and the controller's focus are the same either way.
     /// Refuses text deeper than 512 component nodes before applying any changes.
     fn widget_button(
         &mut self,
@@ -185,6 +192,7 @@ pub trait DrawContext {
         label: &Text,
         active: bool,
         highlighted: bool,
+        sprites: Option<&ButtonSprites>,
     ) -> Result<(), TextFormError> {
         unimplemented!("DrawContext::widget_button")
     }
