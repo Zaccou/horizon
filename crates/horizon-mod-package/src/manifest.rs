@@ -1921,9 +1921,8 @@ capabilities = ["registries"]
     /// A port written one file per class keeps more than 511 source files, far under the byte cap.
     #[test]
     fn a_native_project_of_many_source_files_packs_and_reads() {
-        let root =
-            std::env::temp_dir().join(format!("horizon-many-sources-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
         std::fs::create_dir_all(root.join("src/classes")).unwrap();
         let manifest = format!(
             "{EXAMPLE}[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n",
@@ -1936,11 +1935,10 @@ capabilities = ["registries"]
         for i in 0..700 {
             std::fs::write(root.join(format!("src/classes/c{i}.rs")), "pub struct C;\n").unwrap();
         }
-        let bytes = Package::pack_directory(&root).unwrap();
+        let bytes = Package::pack_directory(root).unwrap();
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         assert_eq!(Package::read_zip(&mut zip).unwrap().manifest.id, "ruby");
         assert!(zip.by_name("src/classes/c699.rs").is_ok());
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
